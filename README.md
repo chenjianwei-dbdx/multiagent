@@ -4,6 +4,17 @@
 
 需求基线见 [Master v1.0](docs/reference/MASTER-v1.0.md)，实施收敛见 [v1.1 方案](docs/01-技术收敛与详细开发方案.md)，决策记录见 [ADR](docs/adr/)（[0001](docs/adr/0001-mvp-boundaries.md)、[0002](docs/adr/0002-web-console.md)、[0003](docs/adr/0003-builtin-template-seeding.md)），锁定版本与探针结论见 [dependency-baseline](docs/dependency-baseline.md)。
 
+## 能力速览
+
+系统的分工是：**LLM 负责判断，程序负责状态、契约、渲染、校验和交付**。
+
+- **拆解上传文档的格式**（`omas template extract`）：解析 DOCX 的正文段落、固定表格、样式与静态页眉页脚，提取槽位契约 / 样式规格 / 静态区域映射并存为不可变版本；重提取产生新版本，已注册版本绝不覆盖。含不支持结构时以 findings 逐条列明（退出码 2，模板不可激活但留审计记录），支持与拒绝的完整清单见下文“支持与不支持”。
+- **材料的只读理解**：Planner（意图 → 槽位计划）与 Assembler（材料 → 绑定意向）只做判断、无任何写权限；Assembler 通过四个任务级只读工具操作材料池——列材料元数据、关键字搜索（打分可解释）、精确 code-point 切片读取（切片前 hash 校验）、签发 span handle。hash 与 span handle 一律由程序生成签发，模型无法自报（硬边界）。
+- **对话式控制台**（`omas web`）：每条消息自动分流——生成文档走装配流水线、纯提问走综合问答（回答只进会话、永不进入正文与溯源链）、信息不足则向用户追问。任务过程逐步显示工具调用；模板库可上传 / 改名 / 写简介。
+- **联网调研后成文**（需 `--data-policy llm_allowed`）：Research agent 判断该查什么、哪些来源可信并调用 `add_source`；字节由程序抓取并注册为任务材料，digest 成笔记后进入装配。默认 `local_only` 任务从不构造远端客户端——程序级断言，不是提示词承诺。
+- **装配与质检**（确定性流水线）：RenderIR → 来源门禁 A → docxtpl 渲染 → 门禁 B（独立 OOXML 再提取复验）→ 格式门禁 → Finalizer。正文只允许两种来源：模板静态内容、材料中的精确 source span；未通过 required gate（含 unknown）不得 finalize。
+- **任务生命周期与恢复**：submitted / running / awaiting_user（输出缺槽列表与可复制的 respond 命令示例）/ completed / failed / cancelled；崩溃后 `omas task recover` 幂等复核已提交产物，跨进程恢复保证最多一份交付；`task export` 只读已提交交付物并输出 sha256。
+
 ## 安装
 
 ```bash

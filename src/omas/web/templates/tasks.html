@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}任务列表 · OMAS 控制台{% endblock %}
+{% block content %}
+
+<section class="card">
+  <h2>任务列表（最近 {{ tasks | length }} 条）</h2>
+  {% if tasks %}
+  <table>
+    <thead><tr><th>任务</th><th>状态</th><th>epoch</th><th>数据策略</th><th>模板</th><th>创建时间</th></tr></thead>
+    <tbody>
+    {% for t in tasks %}
+      <tr>
+        <td><a href="/tasks/{{ t.task_id }}"><code>{{ t.task_id }}</code></a></td>
+        <td><span class="badge status-{{ t.status.value }}">{{ t.status.value }}</span></td>
+        <td>{{ t.epoch }}</td>
+        <td>{{ t.data_policy.value }}</td>
+        <td>{% if t.template_version_id %}<code>{{ t.template_version_id[:20] }}…</code>{% else %}-{% endif %}</td>
+        <td>{{ t.created_at | datetime }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="hint">暂无任务。</p>
+  {% endif %}
+</section>
+
+{% endblock %}

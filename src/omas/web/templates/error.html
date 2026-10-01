@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}错误 · OMAS 控制台{% endblock %}
+{% block content %}
+
+<div class="card">
+  <h1>出错了（{{ status_code }}）</h1>
+  <p>错误码：<code>{{ code }}</code></p>
+  <p>{{ message }}</p>
+  <p class="hint">
+    <a href="/">返回提交任务</a> · <a href="/tasks">任务列表</a>
+  </p>
+</div>
+
+{% endblock %}

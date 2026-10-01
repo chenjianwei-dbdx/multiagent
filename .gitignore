@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+build/
+dist/
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+
+# Agent session metadata
+.zcode/
+
+# OMAS runtime data (never commit ledgers or artifact pools)
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+omas_home/

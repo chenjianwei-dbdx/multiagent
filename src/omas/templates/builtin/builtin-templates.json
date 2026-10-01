@@ -1,0 +1,43 @@
+[
+  {
+    "template_id": "work-report",
+    "display_name": "工作报告",
+    "description": "通用工作报告模板：工作总结、重点成绩、存在问题与下一步安排。",
+    "docx": "work-report.docx",
+    "slot_semantics": {
+      "report_title": "工作报告的完整标题，通常包含汇报主体与时间段，例如“2026年第三季度销售部工作报告”",
+      "work_summary": "报告期内整体工作情况的总结性陈述，概括主要目标与完成情况",
+      "key_results": "报告期内已完成的主要任务、项目及其成果",
+      "open_issues": "工作推进中遇到的主要问题、困难或未达预期的事项",
+      "next_steps": "下一阶段的工作计划、目标与主要措施"
+    }
+  },
+  {
+    "template_id": "monthly-report",
+    "display_name": "月报",
+    "description": "通用月报模板：本月概况、核心指标与进展、问题风险、下月计划。",
+    "docx": "monthly-report.docx",
+    "slot_semantics": {
+      "report_title": "月报的完整标题，通常包含月份与汇报主体，例如“2026年9月运营月报”",
+      "monthly_overview": "本月整体工作或经营概况的概述",
+      "key_metrics": "本月核心指标数据及其环比、同比变化",
+      "work_progress": "本月重点工作的推进情况与节点完成状态",
+      "risks": "当前面临的主要问题、风险及其影响",
+      "next_month_plan": "下月工作目标、计划安排与所需资源支持"
+    }
+  },
+  {
+    "template_id": "research-report",
+    "display_name": "调研报告",
+    "description": "通用调研报告模板：背景目的、对象方法、结果发现、结论建议。",
+    "docx": "research-report.docx",
+    "slot_semantics": {
+      "report_title": "调研报告的完整标题，通常包含调研主题，例如“关于用户需求的调研报告”",
+      "background": "本次调研的背景、目的与意义",
+      "methodology": "调研对象、样本范围、调研方法与实施过程",
+      "findings": "调研获得的主要事实、数据与发现",
+      "analysis": "对调研结果的归纳、对比与分析",
+      "conclusions": "基于调研结果得出的结论与可操作的建议"
+    }
+  }
+]

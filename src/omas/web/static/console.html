@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OMAS 控制台</title>
+<link rel="stylesheet" href="/static/console.css">
+</head>
+<body>
+<noscript><p class="noscript">OMAS 控制台需要启用 JavaScript（仅本地回环使用）。</p></noscript>
+
+<div id="toast-region" aria-live="polite"></div>
+
+<div class="app">
+  <!-- ================================ 左侧栏 ================================ -->
+  <aside class="sidebar">
+    <div class="side-head">
+      <div class="brand"><span class="brand-mark">OMAS</span><span class="brand-sub">办公文档装配控制台</span></div>
+      <button id="btn-new-conv" class="btn primary block" type="button">＋ 新会话</button>
+    </div>
+
+    <nav class="side-section conv-section" aria-label="会话历史">
+      <div class="side-title">会话历史</div>
+      <ul id="conversation-list" class="conv-list"></ul>
+    </nav>
+
+    <nav class="side-section tpl-section" aria-label="模板库">
+      <div class="side-title split"><span>模板库</span>
+        <button id="btn-upload-tpl" class="btn ghost small" type="button">上传模板</button>
+      </div>
+      <div id="template-list" class="tpl-list"></div>
+    </nav>
+  </aside>
+
+  <!-- ================================ 聊天主区 ================================ -->
+  <main class="chat">
+    <header class="chat-head">
+      <div class="chat-title-group">
+        <h1 id="current-title">未选择会话</h1>
+        <span id="current-tpl" class="chip mono" hidden></span>
+        <span id="current-policy" class="chip" hidden></span>
+      </div>
+      <div class="chat-head-note">输入只作为意图或问题，不会成为文档正文</div>
+    </header>
+
+    <section id="messages" class="messages" aria-live="polite"></section>
+
+    <footer class="composer" id="composer">
+      <div id="material-chips" class="material-chips" hidden></div>
+      <div class="composer-row">
+        <textarea id="intent-input" rows="3"
+          placeholder="描述要生成的文档，或直接提问——输入只作为意图或问题，不会成为正文"></textarea>
+        <div class="composer-actions">
+          <button id="btn-attach" class="btn ghost" type="button" title="附带材料文件（可多选，可拖入）">附材料</button>
+          <input type="file" id="material-input" multiple hidden>
+          <button id="btn-send" class="btn primary" type="button">发送 <small class="kbd">⌘/Ctrl+↵</small></button>
+        </div>
+      </div>
+      <div class="composer-hint">意图与材料只用于模型判断与槽位匹配；正文只能来自模板静态内容或材料中的精确片段。</div>
+    </footer>
+  </main>
+</div>
+
+<!-- ============================== 弹层：新会话 ============================== -->
+<div class="overlay" id="overlay-new" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="new-conv-title">
+    <div class="modal-head">
+      <h2 id="new-conv-title">新会话</h2>
+      <button class="icon-btn close-overlay" data-close="overlay-new" type="button" aria-label="关闭">✕</button>
+    </div>
+    <div class="modal-body">
+      <label class="field"><span class="field-label">会话标题（可选）</span>
+        <input id="new-title-input" maxlength="80" placeholder="如：W40 项目周报">
+      </label>
+      <div class="field"><span class="field-label">选择模板</span>
+        <div id="new-tpl-list" class="choose-list"></div>
+      </div>
+      <label class="field check">
+        <input type="checkbox" id="new-llm">
+        <span>允许远端模型（llm_allowed）<em>— 会把意图与材料发送到远端模型</em></span>
+      </label>
+    </div>
+    <div class="modal-foot">
+      <button class="btn ghost close-overlay" data-close="overlay-new" type="button">取消</button>
+      <button class="btn primary" id="btn-create-conv" type="button">创建会话</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============================== 弹层：上传模板（三步） ============================== -->
+<div class="overlay" id="overlay-upload" hidden>
+  <div class="modal wide" role="dialog" aria-modal="true" aria-labelledby="upload-title">
+    <div class="modal-head">
+      <h2 id="upload-title">上传模板</h2>
+      <button class="icon-btn close-overlay" data-close="overlay-upload" type="button" aria-label="关闭">✕</button>
+    </div>
+    <div class="modal-body">
+      <section id="upload-step1" class="upload-step">
+        <div class="step-tag">第 1 步 · 选择 .docx 文件</div>
+        <div id="dropzone" class="dropzone" title="点击选择或拖拽文件到此处">
+          拖拽 .docx 到此处，或点击选择文件
+        </div>
+        <input type="file" id="upload-file" accept=".docx" hidden>
+        <div id="precheck-result" class="precheck-result" hidden></div>
+        <div class="modal-foot inline">
+          <span class="muted small">占位符写法：在需要填充的段落里写 <code class="mono">{{ 槽位名 }}</code></span>
+          <button class="btn primary" id="btn-upload-next" type="button" disabled>下一步</button>
+        </div>
+      </section>
+
+      <section id="upload-step2" class="upload-step" hidden>
+        <div class="step-tag">第 2 步 · 模板信息与槽位语义</div>
+        <div class="field-grid">
+          <label class="field"><span class="field-label">模板 ID（字母 / 数字 / - / _）</span>
+            <input id="tpl-id-input" class="mono" placeholder="weekly-report">
+          </label>
+          <label class="field"><span class="field-label">显示名称（必填）</span>
+            <input id="tpl-display-input" maxlength="80" placeholder="项目周报">
+          </label>
+        </div>
+        <label class="field"><span class="field-label">简介</span>
+          <textarea id="tpl-desc-input" rows="2" maxlength="500" placeholder="模板用途的一句话说明"></textarea>
+        </label>
+        <div class="field"><span class="field-label">槽位语义说明（每项必填，用于模型判断与匹配）</span>
+          <div id="slot-semantics" class="slot-semantics"></div>
+        </div>
+        <div class="modal-foot inline">
+          <button class="btn ghost" id="btn-upload-back" type="button">上一步</button>
+          <button class="btn primary" id="btn-upload-submit" type="button">注册模板</button>
+        </div>
+      </section>
+
+      <section id="upload-step3" class="upload-step" hidden>
+        <div class="step-tag">第 3 步 · 注册结果</div>
+        <div id="upload-result"></div>
+        <div class="modal-foot inline">
+          <span class="muted small">activatable=false 的模板可在补齐语义后重新上传，产生新版本。</span>
+          <button class="btn primary close-overlay" data-close="overlay-upload" type="button">完成</button>
+        </div>
+      </section>
+    </div>
+  </div>
+</div>
+
+<!-- ============================== 弹层：编辑模板信息 ============================== -->
+<div class="overlay" id="overlay-meta" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="meta-title">
+    <div class="modal-head">
+      <h2 id="meta-title">编辑模板信息</h2>
+      <button class="icon-btn close-overlay" data-close="overlay-meta" type="button" aria-label="关闭">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="field"><span class="field-label">模板 ID（不可改）</span>
+        <input id="meta-tid" class="mono" disabled>
+      </div>
+      <label class="field"><span class="field-label">显示名称（必填）</span>
+        <input id="meta-display" maxlength="80">
+      </label>
+      <label class="field"><span class="field-label">简介</span>
+        <textarea id="meta-desc" rows="3" maxlength="500"></textarea>
+      </label>
+      <p class="muted small">只修改展示信息；模板契约（版本、槽位语义）不可变，重提取会产生新版本。</p>
+    </div>
+    <div class="modal-foot">
+      <button class="btn ghost close-overlay" data-close="overlay-meta" type="button">取消</button>
+      <button class="btn primary" id="btn-meta-save" type="button">保存</button>
+    </div>
+  </div>
+</div>
+
+<script src="/static/console.js"></script>
+</body>
+</html>

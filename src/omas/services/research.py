@@ -132,7 +132,10 @@ class ResearchService:
             artifact_id=artifact.artifact_id,
             source_url=url,
             query=query[:400],
-            http_status=0,
+            # program:// 来源没有真实 HTTP 状态；表 CHECK 要求 http_status>=100,
+            # 用 200 标记"登记成功"，来源类型由 source_url 的 program:// 前缀区分。
+            # 曾用 0 导致 digest 非空时 INSERT 必然失败（research_failed）。
+            http_status=200,
             fetched_at=datetime.now(UTC),
         )
         if row is None:

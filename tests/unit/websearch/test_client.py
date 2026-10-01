@@ -28,6 +28,7 @@ from omas.websearch import (
     WebSearchError,
     fetch_page,
 )
+from omas.websearch.client import _TRANSPORT_RETRIES
 
 # --------------------------------------------------------------- httpx stub
 
@@ -80,6 +81,7 @@ class HttpxStub:
         self._responses: list[FakeResponse] = []
         self._index = 0
         self._exc: Exception | None = None
+        self._exc_first_n = 0
 
     def install(
         self,
@@ -87,10 +89,12 @@ class HttpxStub:
         *,
         responses: list[FakeResponse] | None = None,
         exc: Exception | None = None,
+        exc_first_n: int = 0,
     ) -> HttpxStub:
         if responses is not None:
             self._responses = list(responses)
         self._exc = exc
+        self._exc_first_n = exc_first_n
         stub = self
 
         class _Client:
@@ -112,7 +116,9 @@ class HttpxStub:
 
             def request(self, method: str, url: str, **kwargs: Any) -> FakeResponse:
                 stub.requests.append((method, url, kwargs))
-                if stub._exc is not None:
+                if stub._exc is not None and (
+                    stub._exc_first_n == 0 or len(stub.requests) <= stub._exc_first_n
+                ):
                     raise stub._exc
                 return self._next()
 
@@ -320,12 +326,12 @@ def test_tavily_search_request_and_parse(monkeypatch: pytest.MonkeyPatch) -> Non
     assert (method, url) == ("POST", "https://api.tavily.com/search")
     assert kwargs["headers"] == {"Authorization": "Bearer sk-test-123"}
     assert kwargs["json"] == {"query": "weekly report", "max_results": 5}
-    # no system proxy is honoured
-    assert stub.client_kwargs == {
-        "timeout": 20.0,
-        "trust_env": False,
-        "follow_redirects": False,
-    }
+    # no system proxy is honoured；connect 超时收窄到 5s 以便故障出口快速降级
+    kw = stub.client_kwargs
+    assert kw["trust_env"] is False
+    assert kw["follow_redirects"] is False
+    assert kw["timeout"].connect == 5.0
+    assert kw["timeout"].read == 10.0  # 搜索页 read 收窄到 10s，故障出口快速降级
 
 
 def test_tavily_missing_api_key_env_fails_before_http(
@@ -706,11 +712,11 @@ def test_bing_search_request_and_parse(monkeypatch: pytest.MonkeyPatch) -> None:
     assert kwargs["params"]["q"] == "OMAS 钢笔"
     assert kwargs["headers"]["User-Agent"].startswith("Mozilla/5.0")
     # 跟随 www.bing.com → cn.bing.com 的 302，且信任环境变量代理被关闭
-    assert stub.client_kwargs == {
-        "timeout": 20.0,
-        "trust_env": False,
-        "follow_redirects": True,
-    }
+    kw = stub.client_kwargs
+    assert kw["trust_env"] is False
+    assert kw["follow_redirects"] is True
+    assert kw["timeout"].connect == 5.0
+    assert kw["timeout"].read == 10.0  # 搜索页 read 收窄到 10s，故障出口快速降级
 
 
 def test_bing_captcha_page_raises_without_results(
@@ -734,3 +740,128 @@ def test_local_only_rejects_bing_before_http(monkeypatch: pytest.MonkeyPatch) ->
     with pytest.raises(ModelGatewayError):
         SearchClient(settings, ModelGateway(policy=DataPolicy.LOCAL_ONLY)).search("x")
     assert stub.clients_opened == 0
+
+
+# ----------------------------------------------------------- transport retry
+
+
+def test_transport_hiccup_is_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    """传输层瞬断（连接重置）应重试到成功，不改变结果解析。"""
+    monkeypatch.setenv("TAVILY_API_KEY", "sk-test-123")
+    monkeypatch.setattr(ws_client.time, "sleep", lambda _s: None)
+    stub = HttpxStub().install(
+        monkeypatch,
+        responses=[
+            FakeResponse(
+                json_data=_results_payload(
+                    {"title": "T1", "url": "https://a.example", "content": "hit"}
+                )
+            )
+        ],
+        exc=httpx.ConnectError("connection reset"),
+        exc_first_n=2,
+    )
+    outcome = SearchClient(_tavily_settings(), _llm_allowed()).search("weekly report")
+    assert outcome.results == (WebResult("T1", "https://a.example", "hit"),)
+    # 首次 + 2 次重试 = 3 次请求
+    assert len(stub.requests) == 3
+
+
+def test_transport_retry_exhausted_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """持续传输失败时重试耗尽抛 WebSearchError；策略拒绝不在此层重试。"""
+    monkeypatch.setenv("TAVILY_API_KEY", "sk-test-123")
+    monkeypatch.setattr(ws_client.time, "sleep", lambda _s: None)
+    stub = HttpxStub().install(
+        monkeypatch,
+        exc=httpx.ReadTimeout("read timed out"),
+        exc_first_n=0,  # 每次都抛
+    )
+    with pytest.raises(WebSearchError, match="timed out"):
+        SearchClient(_tavily_settings(), _llm_allowed()).search("weekly report")
+    assert len(stub.requests) == _TRANSPORT_RETRIES + 1
+
+
+# ----------------------------------------------------- sogou parser + fallback
+
+_SOGOU_MARKUP = (
+    '<html><body><div id="header"></div>'
+    '<div class="vrwrap"><h3 class="vr-title">'
+    '<a target="_blank" href="/link?url=abc123def456">'
+    '<em>LangGraph</em>:基于图结构的智能体框架'
+    "</a></h3><p>摘要文本一</p></div>"
+    '<div class="vrwrap"><h3 class="vr-title">'
+    '<a target="_blank" href="https://example.com/post-2">第二篇结果</a>'
+    "</h3><p>摘要文本二</p></div>"
+    '<div class="vrwrap"><h3 class="vr-title">no-anchor heading</h3></div>'
+    "</body></html>"
+)
+
+
+def _bing_with_sogou_fallback(**overrides: Any) -> SearchSettings:
+    fields: dict[str, Any] = {
+        "provider": "bing",
+        "base_url": "https://www.bing.com",
+        "fallback_provider": "sogou",
+        "fallback_base_url": "https://www.sogou.com",
+        "max_results": 5,
+    }
+    fields.update(overrides)
+    return SearchSettings.model_validate(fields)
+
+
+def test_sogou_parser_full_block() -> None:
+    from omas.websearch.client import _parse_sogou_html
+
+    payload = _parse_sogou_html(_SOGOU_MARKUP, limit=5)
+    results = payload["results"]
+    # 第三块（h3 里没有 a）被跳过
+    assert len(results) == 2
+    assert results[0]["url"] == "https://www.sogou.com/link?url=abc123def456"
+    assert results[0]["title"] == "LangGraph:基于图结构的智能体框架"
+    assert results[0]["content"] == "摘要文本一"
+    assert results[1]["url"] == "https://example.com/post-2"
+    assert results[1]["content"] == "摘要文本二"
+
+
+def test_fallback_engine_used_when_primary_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """主 bing 持续传输失败 → 自动降级 sogou 并复用其解析结果。"""
+    monkeypatch.setattr(ws_client.time, "sleep", lambda _s: None)
+    stub = HttpxStub().install(
+        monkeypatch,
+        responses=[FakeResponse(text=_SOGOU_MARKUP)],
+        exc=httpx.ConnectError("primary unreachable"),
+        # 覆盖主引擎的首次 + 2 次重试；第 4 次请求（fallback）返回响应
+        exc_first_n=_TRANSPORT_RETRIES + 1,
+    )
+    outcome = SearchClient(_bing_with_sogou_fallback(), _llm_allowed()).search(
+        "LangGraph"
+    )
+    assert outcome.provider == "sogou"
+    assert outcome.results[0].title == "LangGraph:基于图结构的智能体框架"
+    assert outcome.results[0].url == "https://www.sogou.com/link?url=abc123def456"
+    assert stub.requests[0][1].startswith("https://www.bing.com")
+    assert stub.requests[-1][1].startswith("https://www.sogou.com")
+
+
+def test_fallback_endpoint_rejected_under_local_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """降级路径同样过策略门：local_only 不能借备用引擎出网。"""
+    monkeypatch.setattr(ws_client.time, "sleep", lambda _s: None)
+    # 主引擎用回环 searxng（local_only 允许），让它传输失败触发降级
+    stub = HttpxStub().install(
+        monkeypatch,
+        responses=[],
+        exc=httpx.ConnectError("loopback hiccup"),
+        exc_first_n=_TRANSPORT_RETRIES + 1,
+    )
+    settings = _bing_with_sogou_fallback(
+        provider="searxng",
+        base_url="http://127.0.0.1:8888",
+    )
+    with pytest.raises(ModelGatewayError, match="web_search"):
+        SearchClient(settings, _local_only()).search("LangGraph")
+    # 降级端点的 guard 在任何备用 HTTP 字节之前
+    assert all("sogou" not in url for url, _, _ in stub.requests)

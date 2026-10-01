@@ -18,6 +18,12 @@ from omas.security.model_gateway import ModelEndpointConfig, ModelGateway
 
 _ANTHROPIC_FORMAT_PROVIDERS = frozenset({"anthropic", "anthropic-compatible"})
 
+#: 模型请求超时（秒）。anthropic SDK 默认 600s——远端偶发挂起时图节点会
+#: 停在中途不前进（前端表现为任务卡在某阶段、三点一直转）。180s 对慢响应
+#: 足够;超时后 research 节点降级为非致命 research_failed 并继续装配，
+#: plan/assemble 则以 execution_failed 明确终止，都不会再"永久卡住"。
+_MODEL_TIMEOUT_S: float = 180.0
+
 
 def endpoint_of(settings: ModelSettings) -> ModelEndpointConfig:
     return ModelEndpointConfig(
@@ -55,10 +61,16 @@ def build_model(
                 raise ModelGatewayError(
                     f"API key environment variable {settings.api_key_env} is not set"
                 )
+        import anthropic
         from pydantic_ai.models.anthropic import AnthropicModel
         from pydantic_ai.providers.anthropic import AnthropicProvider
 
-        provider = AnthropicProvider(api_key=api_key, base_url=settings.base_url)
+        client = anthropic.AsyncAnthropic(
+            api_key=api_key,
+            base_url=settings.base_url,
+            timeout=_MODEL_TIMEOUT_S,
+        )
+        provider = AnthropicProvider(anthropic_client=client)
         return AnthropicModel(settings.model_id, provider=provider)
     raise ModelGatewayError(
         f"unsupported provider {settings.provider!r}; "

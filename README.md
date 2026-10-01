@@ -2,6 +2,17 @@
 
 单机、单用户、单执行器。LLM 负责判断；**程序**负责状态、契约、渲染、校验和交付。最终正文只允许两种来源：版本化模板静态内容、用户/上游材料的精确 source span。
 
+**执行底座是 LangGraph**（项目唯一引入的 Agent 框架，不叠加其他框架）。整条任务流水线是一条 `StateGraph` 状态图：
+
+```
+submit 期: ingest → bind_template
+图内: START → inventory → plan → research → assemble_bind → gap_check
+  → 缺料: interrupt ⇒ awaiting_user → wait_for_input → 回到 inventory
+  → 齐料: render_docx → provenance_gate → format_gate → finalize → END
+```
+
+LangGraph 只承担状态机与调度：task_id 即 thread_id，进度落 SQLite checkpoint，缺料时以 interrupt 挂起；所有判断、契约校验、渲染与交付仍由确定性程序代码负责——图本身没有自由文本入口。
+
 需求基线见 [Master v1.0](docs/reference/MASTER-v1.0.md)，实施收敛见 [v1.1 方案](docs/01-技术收敛与详细开发方案.md)，决策记录见 [ADR](docs/adr/)（[0001](docs/adr/0001-mvp-boundaries.md)、[0002](docs/adr/0002-web-console.md)、[0003](docs/adr/0003-builtin-template-seeding.md)），锁定版本与探针结论见 [dependency-baseline](docs/dependency-baseline.md)。
 
 ## 能力速览
@@ -119,3 +130,7 @@ omas task submit ... --data-policy llm_allowed # 显式选择后该任务才发�
 ```
 
 local_only 任务（默认）从不构造远端客户端——这是程序级断言（T12），不是提示词承诺。
+
+## 开发过程说明
+
+本项目全流程（P0 契约与存储 → P5 CLI 验收，以及其后的 `omas web` 控制台与 research 管线）由 **Atria 模型（Atria-Dawn-Preview）** 开发完成：需求拆解、代码实现、测试编写与验证均由该模型执行，开发约定与测试纪律见 `AGENTS.md`。LLM 在此承担的是「开发者」角色；交付物中的 LLM 判断链路（Planner/Assembler/BindingService）则以受控替身与真实远端端点两种方式验证。

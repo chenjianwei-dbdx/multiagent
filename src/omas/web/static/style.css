@@ -220,4 +220,24 @@ td a:hover { text-decoration: underline; }
 .events .kv { font-family: var(--mono); color: #475467; }
 .events .time { color: var(--muted); margin-left: auto; }
 
+/* 事件流折叠（原生 details，默认收起；与 console.css 的 ev-* 语义着色同步） */
+
+.events-fold { margin-top: 6px; }
+.events-fold > summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 13px;
+  padding: 4px 0;
+}
+.events-fold > summary:hover { color: var(--accent); }
+.events-fold[open] > summary { margin-bottom: 8px; }
+
+.events .ev-label { font-weight: 600; }
+.events .ev-note { color: var(--warn); font-size: 12px; }
+.events li.ev-research_failed .ev-label { color: var(--warn); }
+.events li.ev-researched .ev-label { color: var(--ok); }
+.events li.ev-exported .ev-label { color: var(--ok); }
+.events li.ev-execution_failed .ev-label { color: var(--danger); }
+.events li.ev-awaiting_user .ev-label { color: var(--warn); }
+
 .awaiting { border-left: 4px solid var(--warn); }

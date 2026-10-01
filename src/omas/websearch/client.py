@@ -25,6 +25,7 @@ from __future__ import annotations
 import html
 import os
 import re
+import time
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from typing import Final
@@ -36,14 +37,37 @@ from omas.config.settings import SearchSettings
 from omas.domain.errors import OmasError
 from omas.security.model_gateway import ModelGateway
 
-#: Search providers understood by :class:`SearchClient` (bing Needs no key).
-SEARCH_PROVIDERS: Final[frozenset[str]] = frozenset({"tavily", "searxng", "generic", "bing"})
+#: Search providers understood by :class:`SearchClient` (bing/sogou need no key).
+SEARCH_PROVIDERS: Final[frozenset[str]] = frozenset(
+    {"tavily", "searxng", "generic", "bing", "sogou"}
+)
 
 #: Queries longer than this are truncated (never rejected) before transport.
 QUERY_MAX_CHARS: Final[int] = 400
 
 #: Provider request timeout (search and fetch default).
 DEFAULT_TIMEOUT_S: Final[float] = 20.0
+
+#: Connect 超时：故障出口（本机 bing 间歇性抖动）在建连/读响应阶段挂起，
+#: 默认 20s 会把每次重试拖满；建连通常远低于 5s，故障时 3 次尝试仅 15s
+#: 即可降级到备用引擎，对连通站点无影响。
+CONNECT_TIMEOUT_S: Final[float] = 5.0
+#: 搜索结果页的读超时：HTML 页面正常远低于 10s；bing 被 QoS 时表现为
+#: 连接已建立但响应不回，此时是 read 超时在拖时间。收窄到 10s 后，
+#: 主引擎 3 次尝试最多 ~30s 就能降级。fetch_page 正文页仍用 20s。
+SEARCH_READ_TIMEOUT_S: Final[float] = 10.0
+_HTTP_TIMEOUT: Final[httpx.Timeout] = httpx.Timeout(
+    connect=CONNECT_TIMEOUT_S,
+    read=DEFAULT_TIMEOUT_S,
+    write=DEFAULT_TIMEOUT_S,
+    pool=DEFAULT_TIMEOUT_S,
+)
+_SEARCH_TIMEOUT: Final[httpx.Timeout] = httpx.Timeout(
+    connect=CONNECT_TIMEOUT_S,
+    read=SEARCH_READ_TIMEOUT_S,
+    write=DEFAULT_TIMEOUT_S,
+    pool=DEFAULT_TIMEOUT_S,
+)
 
 #: Hard byte cap for one streamed page fetch (excess bytes are dropped).
 MAX_PAGE_BYTES: Final[int] = 2 * 1024 * 1024  # 2 MiB
@@ -56,6 +80,12 @@ BROWSER_UA: Final[str] = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
 )
+
+#: 传输层瞬断（超时/连接重置等）时的重试次数与退避间隔（含首次共 3 次尝试）。
+#: 国际出口偶发抖动，单次传输失败不代表请求本身有缺陷；本层只重试传输
+#: 异常——策略拒绝与状态码/解析错误不重试，fail-closed 语义不变。
+_TRANSPORT_RETRIES: Final[int] = 2
+_TRANSPORT_RETRY_DELAY_S: Final[float] = 0.8
 
 _REDIRECT_STATUSES: Final[frozenset[int]] = frozenset({301, 302, 303, 307, 308})
 
@@ -194,19 +224,63 @@ class SearchClient:
 
         limit = settings.max_results if max_results is None else max(1, min(10, max_results))
 
-        if provider == "tavily":
-            payload = self._search_tavily(settings, base_url, normalized_query, limit)
-        elif provider == "searxng":
-            payload = self._search_searxng(base_url, normalized_query)
-        elif provider == "bing":
-            payload = self._search_bing(base_url, normalized_query, limit)
-        else:
-            payload = self._search_generic(base_url, normalized_query, limit)
+        try:
+            payload = self._provider_payload(
+                provider, base_url, normalized_query, limit, settings=settings
+            )
+        except WebSearchError:
+            # 主引擎传输/解析失败 → 降级备用引擎（端点各自过网关，
+            # fail-closed 不变；未配置备用引擎则原样抛出）。
+            # 背景：本机 bing 出口间歇性抖动，重试挡不住分钟级故障。
+            fallback = self._fallback_endpoint(settings)
+            if fallback is None:
+                raise
+            provider, base_url = fallback
+            payload = self._provider_payload(
+                provider, base_url, normalized_query, limit, settings=settings
+            )
         return SearchOutcome(
             results=_parse_results(payload, limit=limit),
             provider=provider,
             query=normalized_query,
         )
+
+    def _provider_payload(
+        self,
+        provider: str,
+        base_url: str,
+        query: str,
+        limit: int,
+        *,
+        settings: SearchSettings,
+    ) -> dict[str, object]:
+        """One provider dispatch step; isolated so the fallback can reuse it."""
+        if provider == "tavily":
+            return self._search_tavily(settings, base_url, query, limit)
+        if provider == "searxng":
+            return self._search_searxng(base_url, query)
+        if provider == "bing":
+            return self._search_bing(base_url, query, limit)
+        if provider == "sogou":
+            return self._search_sogou(base_url, query, limit)
+        return self._search_generic(base_url, query, limit)
+
+    def _fallback_endpoint(
+        self, settings: SearchSettings
+    ) -> tuple[str, str] | None:
+        """Resolve and policy-check the configured fallback engine, if any."""
+        fb_provider = (settings.fallback_provider or "").strip().lower()
+        fb_base_url = (settings.fallback_base_url or "").rstrip("/")
+        if not fb_provider or not fb_base_url:
+            return None
+        if fb_provider not in SEARCH_PROVIDERS:
+            raise WebSearchError(
+                f"unsupported fallback search provider "
+                f"{settings.fallback_provider!r}; expected one of {sorted(SEARCH_PROVIDERS)}"
+            )
+        # 备用端点同样先过策略门：local_only 决不能借备用通道出网
+        self._gateway.guard_web_endpoint(fb_base_url, category="web_search")
+        return fb_provider, fb_base_url
 
     # ------------------------------------------------------------ providers
 
@@ -226,12 +300,16 @@ class SearchClient:
             f"{base_url}/search",
             headers=headers,
             json={"query": query, "max_results": limit},
+            timeout=_SEARCH_TIMEOUT,
         )
         return _json_payload(response)
 
     def _search_searxng(self, base_url: str, query: str) -> dict[str, object]:
         response = self._request(
-            "GET", f"{base_url}/search", params={"q": query, "format": "json"}
+            "GET",
+            f"{base_url}/search",
+            params={"q": query, "format": "json"},
+            timeout=_SEARCH_TIMEOUT,
         )
         # searxng's format=json returns search metadata plus results[];
         # the result cap is applied client-side in _parse_results.
@@ -239,7 +317,10 @@ class SearchClient:
 
     def _search_generic(self, base_url: str, query: str, limit: int) -> dict[str, object]:
         response = self._request(
-            "POST", base_url, json={"query": query, "max_results": limit}
+            "POST",
+            base_url,
+            json={"query": query, "max_results": limit},
+            timeout=_SEARCH_TIMEOUT,
         )
         return _json_payload(response)
 
@@ -262,12 +343,42 @@ class SearchClient:
             },
             follow_redirects=True,
             final_url_category="web_search",
+            timeout=_SEARCH_TIMEOUT,
         )
         markup = _text_body(response)
         payload = _parse_bing_html(markup, limit=limit)
         if not payload["results"]:
             raise WebSearchError(
                 "bing 搜索页未解析到自然结果（可能为验证页或结构变更）"
+            )
+        return payload
+
+    def _search_sogou(self, base_url: str, query: str, limit: int) -> dict[str, object]:
+        """搜狗通用搜索页（HTML 免 key）：解析 vrwrap 自然结果块。
+
+        仅供 llm_allowed：www.sogou.com 非本地地址，local_only 时网关在构造
+        传输之前即拒绝（含备用降级路径）。结果链接可能是 ``/link?url=``
+        跳转链，这里绝对化为 sogou 域 URL，由后续 fetch_page 跟随重定向到
+        真实站点（落地页再过 web_fetch 网关）。
+        """
+        response = self._request(
+            "GET",
+            f"{base_url}/web",
+            params={"query": query},
+            headers={
+                "User-Agent": BROWSER_UA,
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                "Accept": "text/html,application/xhtml+xml",
+            },
+            follow_redirects=True,
+            final_url_category="web_search",
+            timeout=_SEARCH_TIMEOUT,
+        )
+        markup = _text_body(response)
+        payload = _parse_sogou_html(markup, limit=limit)
+        if not payload["results"]:
+            raise WebSearchError(
+                "sogou 搜索页未解析到自然结果（可能为验证页或结构变更）"
             )
         return payload
 
@@ -283,26 +394,45 @@ class SearchClient:
         params: dict[str, str] | None = None,
         follow_redirects: bool = False,
         final_url_category: str | None = None,
+        timeout: httpx.Timeout | None = None,
     ) -> httpx.Response:
-        """One guarded, proxy-ignoring HTTP request; errors stay body-free."""
-        try:
-            with httpx.Client(
-                timeout=DEFAULT_TIMEOUT_S, trust_env=False, follow_redirects=follow_redirects
-            ) as client:
-                response = client.request(
-                    method, url, headers=headers, json=json, params=params
-                )
-                if final_url_category:
-                    # 跳转链的落地页必须重新过网关，防止静默落到别的域
-                    self._gateway.guard_web_endpoint(
-                        str(response.url), category=final_url_category
+        """One guarded, proxy-ignoring HTTP request; errors stay body-free.
+
+        传输层瞬断最多重试 ``_TRANSPORT_RETRIES`` 次；策略拒绝（guard）与
+        状态码/解析错误不在本层重试——fail-closed 只针对策略，传输重试
+        不构成绕过。``timeout`` 默认含 20s read（fetch 正文页），搜索类
+        调用应传 ``_SEARCH_TIMEOUT`` 收窄 read。
+        """
+        last_exc: WebSearchError | None = None
+        if timeout is None:
+            timeout = _HTTP_TIMEOUT
+        for attempt in range(_TRANSPORT_RETRIES + 1):
+            try:
+                with httpx.Client(
+                    timeout=timeout, trust_env=False, follow_redirects=follow_redirects
+                ) as client:
+                    response = client.request(
+                        method, url, headers=headers, json=json, params=params
                     )
-                _require_success(response, what="search provider")
-                return response
-        except httpx.TimeoutException as exc:
-            raise WebSearchError(f"search request timed out ({type(exc).__name__})") from exc
-        except httpx.HTTPError as exc:
-            raise WebSearchError(f"search request failed ({type(exc).__name__})") from exc
+                    if final_url_category:
+                        # 跳转链的落地页必须重新过网关，防止静默落到别的域
+                        self._gateway.guard_web_endpoint(
+                            str(response.url), category=final_url_category
+                        )
+                    _require_success(response, what="search provider")
+                    return response
+            except httpx.TimeoutException as exc:
+                err = WebSearchError(f"search request timed out ({type(exc).__name__})")
+                err.__cause__ = exc
+                last_exc = err
+            except httpx.HTTPError as exc:
+                err = WebSearchError(f"search request failed ({type(exc).__name__})")
+                err.__cause__ = exc
+                last_exc = err
+            if attempt < _TRANSPORT_RETRIES:
+                time.sleep(_TRANSPORT_RETRY_DELAY_S)
+        assert last_exc is not None  # 循环至少执行一次且必然经过 except 分支
+        raise last_exc
 
 
 def _json_payload(response: httpx.Response) -> dict[str, object]:
@@ -354,6 +484,42 @@ def _strip_tags(fragment: str) -> str:
     """去标签并压缩空白（片段级，不解析整个文档）。"""
     text = re.sub(r"<[^>]+>", "", fragment)
     return re.sub(r"\s+", " ", text)
+
+
+_SOGOU_ITEM = re.compile(
+    r'<h3[^>]*class="[^"]*vr-title[^"]*"[^>]*>\s*'
+    r'<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>'
+    r"(.*?)(?=<h3[^>]*|$)",
+    re.DOTALL,
+)
+_SOGOU_SNIPPET = re.compile(r"<p[^>]*>(.*?)</p>", re.DOTALL)
+
+
+def _parse_sogou_html(markup: str, *, limit: int) -> dict[str, object]:
+    """把搜狗 SERP HTML 解析成 results 数组（h3.vr-title 自然结果）。
+
+    以 ``h3.vr-title`` 为锚（不依赖外层 vrwrap 容器：容器结构不稳定，
+    会丢结果）。纯离线函数，可单测；解析失败返回空 results 由调用方
+    决定是否报错。
+    """
+    results: list[dict[str, str]] = []
+    for link_url, title_html, rest in _SOGOU_ITEM.findall(markup)[: max(limit, 1)]:
+        url = html.unescape(link_url).strip()
+        title = html.unescape(_strip_tags(title_html)).strip()
+        if not url or not title:
+            continue
+        if url.startswith("/link?"):
+            url = f"https://www.sogou.com{url}"
+        elif not url.startswith(("http://", "https://")):
+            continue
+        snippet_match = _SOGOU_SNIPPET.search(rest)
+        snippet = (
+            html.unescape(_strip_tags(snippet_match.group(1))).strip()
+            if snippet_match
+            else ""
+        )
+        results.append({"title": title, "url": url, "content": snippet})
+    return {"results": results}
 
 
 def _parse_results(payload: dict[str, object], *, limit: int) -> tuple[WebResult, ...]:

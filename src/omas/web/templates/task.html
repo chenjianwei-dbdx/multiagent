@@ -93,17 +93,25 @@
          data-terminal="{% if view.task.is_terminal() %}1{% else %}0{% endif %}">
   <h2>事件流（最新在上）</h2>
   {% if events %}
-  <ul class="events">
-    {% for item in events %}
-    <li>
-      <span class="seq">#{{ item.seq }}</span>
-      <span class="code">{{ item.event_code }}</span>
-      {% for k, v in item.counts.items() | sort %}<span class="kv">counts:{{ k }}={{ v }}</span>{% endfor %}
-      {% for k, v in item.refs.items() | sort %}<span class="kv">{{ k }}={{ v }}</span>{% endfor %}
-      <span class="time">{{ item.created_at | datetime }}</span>
-    </li>
-    {% endfor %}
-  </ul>
+  <details class="events-fold">
+    <summary>
+      共 {{ events | length }} 条事件 · 最近：{{ events[0].event_code | event_label }}
+      {% if events[0].event_code | event_note %}<span class="ev-note">（{{ events[0].event_code | event_note }}）</span>{% endif %}
+    </summary>
+    <ul class="events">
+      {% for item in events %}
+      <li class="ev-{{ item.event_code }}">
+        <span class="seq">#{{ item.seq }}</span>
+        <span class="ev-label">{{ item.event_code | event_label }}</span>
+        <span class="code">{{ item.event_code }}</span>
+        {% if item.event_code | event_note %}<span class="ev-note">{{ item.event_code | event_note }}</span>{% endif %}
+        {% for k, v in item.counts.items() | sort %}<span class="kv">counts:{{ k }}={{ v }}</span>{% endfor %}
+        {% for k, v in item.refs.items() | sort %}<span class="kv">{{ k }}={{ v }}</span>{% endfor %}
+        <span class="time">{{ item.created_at | datetime }}</span>
+      </li>
+      {% endfor %}
+    </ul>
+  </details>
   {% else %}
   <p class="hint">暂无事件。</p>
   {% endif %}

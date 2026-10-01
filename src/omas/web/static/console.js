@@ -36,6 +36,8 @@
     inventory: '☰',
     tool_call: '⚙',
     plan: '✎',
+    researched: '⇅',
+    research_failed: '⚡',
     assembled: '◈',
     binding_committed: '✓',
     awaiting_user: '⚠',
@@ -154,6 +156,7 @@
       this.awaitHandledFor = null; // 已应答过的 awaiting_event_id（防重复展示）
       this.timer = null;
       this.stopped = false;
+      this.timelineOpen = false; // 时间线默认收起，点概要行展开
       this.node = this.build();
     }
 
@@ -177,7 +180,7 @@
       for (let i = 0; i < 3; i++) this.dotsEl.append(el('span'));
       this.dotsEl.hidden = true;
       this.footExtra = el('div', 'task-foot-extra');
-      foot.append(this.stageEl, this.dotsEl, this.footExtra);
+      foot.append(this.dotsEl, this.stageEl, this.footExtra);
       card.append(head, this.timeline, this.awaitPanel, foot);
       return card;
     }
@@ -203,7 +206,10 @@
       this.chip.className = 'task-chip st-' + status;
 
       clear(this.timeline);
-      for (const ev of this.events) this.timeline.append(renderEventRow(ev, this));
+      this.timeline.append(this.renderTimelineToggle());
+      if (this.timelineOpen) {
+        for (const ev of this.events) this.timeline.append(renderEventRow(ev, this));
+      }
 
       const awaiting = view && view.awaiting && status === 'awaiting_user' ? view.awaiting : null;
       if (awaiting && awaiting.awaiting_event_id !== this.awaitHandledFor) {
@@ -229,9 +235,34 @@
         );
       } else if (status === 'failed') {
         this.footExtra.append(
-          el('span', 'chip danger', '执行失败 — 见时间线 execution_failed；可在 CLI 用 omas task events 复查')
+          el('span', 'chip danger', '执行失败 — 展开下方时间线查看 execution_failed；可在 CLI 用 omas task events 复查')
         );
       }
+    }
+
+    // 时间线概要行：收起态单行（展开入口 + 步数 + 最近进展），展开态为收起按钮
+    renderTimelineToggle() {
+      const li = el('li', 'ev ev-toggle');
+      const btn = el('button', 'tl-toggle');
+      btn.type = 'button';
+      if (this.timelineOpen) {
+        btn.textContent = '▾ 收起';
+      } else {
+        const n = this.events.length;
+        let label = n ? '▸ 展开 · 共 ' + n + ' 步' : '▸ 暂无事件';
+        if (n) {
+          const last = describeEvent(this.events[n - 1], this);
+          label += ' · 最近: ' + last.text;
+        }
+        btn.textContent = label;
+        btn.disabled = !n;
+      }
+      btn.addEventListener('click', () => {
+        this.timelineOpen = !this.timelineOpen;
+        this.render();
+      });
+      li.append(btn);
+      return li;
     }
 
     async respond(action, slotId, files) {
@@ -301,14 +332,26 @@
     return parts.join(' ');
   }
 
-  function renderEventRow(ev, card) {
-    if (ev.event_code === 'tool_call') return renderToolRow(ev);
+  // 事件 → {icon, text, sub, tones}：时间线行与收起态概要行共用
+  function describeEvent(ev, card) {
     const refs = ev.refs || {};
     const counts = ev.counts || {};
-    const row = el('li', 'ev ev-' + ev.event_code);
-    row.append(el('span', 'ev-ico', EVENT_ICONS[ev.event_code] || '·'));
+    if (ev.event_code === 'tool_call') {
+      const parts = [];
+      if (refs.artifact_id) parts.push('art:' + shortId(refs.artifact_id, 12));
+      if (refs.span_handle) parts.push('span:' + shortId(refs.span_handle, 12));
+      const countsText = countsLabel(counts);
+      if (countsText) parts.push(countsText);
+      return {
+        icon: '⚙',
+        text: TOOL_LABELS[refs.tool || 'tool'] || '工具调用',
+        sub: parts.join(' · '),
+        tones: ['tool'],
+      };
+    }
     let text = ev.event_code;
     let sub = '';
+    const tones = [];
     switch (ev.event_code) {
       case 'task_submitted':
         text = '任务已提交';
@@ -319,6 +362,19 @@
         break;
       case 'plan':
         text = '生成内容计划';
+        break;
+      case 'researched':
+        text = '联网采集完成';
+        sub = counts.sources !== undefined
+          ? '来源 ' + counts.sources + ' 个，已登记为任务材料'
+          : '来源已登记为任务材料';
+        tones.push('ok');
+        break;
+      case 'research_failed':
+        // 非致命：图内 research 失败只记录并跳过，任务继续装配，缺槽由 gap_check 兜底
+        text = '联网采集失败（已跳过，非任务失败）';
+        sub = '任务继续装配，缺槽时由门禁提示补充';
+        tones.push('warn');
         break;
       case 'assembled':
         text = '装配槽位绑定' + (counts.slots !== undefined ? ' (' + counts.slots + ' 槽)' : '');
@@ -334,7 +390,7 @@
           ? card.missing.join(', ')
           : (counts.missing !== undefined ? counts.missing + ' 个槽位' : '?');
         text = '等待补充：缺槽 [ ' + list + ' ]';
-        row.classList.add('warn');
+        tones.push('warn');
         break;
       }
       case 'decision_provide_material':
@@ -345,16 +401,16 @@
         break;
       case 'exported':
         text = '交付物已导出';
-        row.classList.add('ok');
+        tones.push('ok');
         break;
       case 'execution_failed':
         text = '执行失败';
         sub = 'code=' + (counts.code !== undefined ? counts.code : '?');
-        row.classList.add('err');
+        tones.push('err');
         break;
       case 'task_cancelled':
         text = '任务已取消';
-        row.classList.add('dim');
+        tones.push('dim');
         break;
       case 'task_recovered':
         text = '任务已恢复';
@@ -366,25 +422,21 @@
     if (refs.awaiting_event && ev.event_code === 'awaiting_user') {
       sub = 'awaiting_event: ' + shortId(refs.awaiting_event, 12);
     }
-    row.append(el('span', 'ev-text', text));
-    if (sub) row.append(el('span', 'ev-sub', sub));
-    return row;
+    return { icon: EVENT_ICONS[ev.event_code] || '·', text: text, sub: sub, tones: tones };
   }
 
-  function renderToolRow(ev) {
-    const refs = ev.refs || {};
-    const counts = ev.counts || {};
-    const tool = refs.tool || 'tool';
-    const row = el('li', 'ev ev-tool_call tool');
-    row.append(el('span', 'ev-ico', '⚙'));
-    row.append(el('code', 'tool-badge', tool));
-    row.append(el('span', 'ev-text', TOOL_LABELS[tool] || '工具调用'));
-    const sub = [];
-    if (refs.artifact_id) sub.push('art:' + shortId(refs.artifact_id, 12));
-    if (refs.span_handle) sub.push('span:' + shortId(refs.span_handle, 12));
-    const countsText = countsLabel(counts);
-    if (countsText) sub.push(countsText);
-    if (sub.length) row.append(el('span', 'ev-sub', sub.join(' · ')));
+  function renderEventRow(ev, card) {
+    const info = describeEvent(ev, card);
+    const row = el(
+      'li',
+      'ev ev-' + ev.event_code + (info.tones.length ? ' ' + info.tones.join(' ') : '')
+    );
+    row.append(el('span', 'ev-ico', info.icon));
+    if (ev.event_code === 'tool_call') {
+      row.append(el('code', 'tool-badge', (ev.refs || {}).tool || 'tool'));
+    }
+    row.append(el('span', 'ev-text', info.text));
+    if (info.sub) row.append(el('span', 'ev-sub', info.sub));
     return row;
   }
 
@@ -402,6 +454,8 @@
       case 'inventory': return { label: '盘点材料', tone: '' };
       case 'tool_call': return { label: '模型正在调用工具…', tone: '' };
       case 'plan': return { label: '生成内容计划', tone: '' };
+      case 'researched': return { label: '联网采集完成，准备装配', tone: '' };
+      case 'research_failed': return { label: '联网采集失败已跳过，继续装配', tone: 'warn' };
       case 'assembled': return { label: '装配槽位绑定', tone: '' };
       case 'binding_committed': return { label: '渲染与门禁校验', tone: '' };
       case 'exported': return { label: '已交付', tone: 'ok' };
@@ -865,12 +919,14 @@
         { method: 'POST', body: fd }
       );
       // 202 turn_started：服务端先做意图分流，再出回答/追问/任务卡，全部经会话轮询渲染
-      state.pendingUserText = intent;
       addTextMessage('user', intent, fileNames);
       input.value = '';
       autoGrow(input);
       setPendingFiles([]);
       startTurnPolling(conv.conversation_id);
+      // 必须在 startTurnPolling 之后设置：其内部先调 stopTurnPolling()
+      // 会清空 pendingUserText，先设就会被清掉，轮询时会再渲染一遍同一条用户消息
+      state.pendingUserText = intent;
       loadConversationsQuiet();
     } catch (err) {
       if (err && err.code === 'TURN_BUSY') {

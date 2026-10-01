@@ -51,6 +51,10 @@ class SearchSettings(BaseModel):
     base_url: str = Field(min_length=1)
     api_key_env: str | None = None
     max_results: int = Field(default=5, ge=1, le=10)
+    #: 备用引擎：主引擎传输/解析失败时自动降级再搜一次（本机 bing 出口
+    #: 间歇性故障的对策）。两套端点各自过 web 网关，local_only 仍只允许回环。
+    fallback_provider: str | None = None
+    fallback_base_url: str | None = None
 
 
 class ModelsConfig(BaseModel):

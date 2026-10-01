@@ -44,3 +44,23 @@ def test_unsupported_provider_rejected() -> None:
     settings = ModelSettings(provider="openai", model_id="gpt-x", base_url="https://x")
     with pytest.raises(ModelGatewayError, match="Anthropic-format"):
         build_model(settings, gateway=gateway, policy=DataPolicy.LLM_ALLOWED)
+
+
+def test_model_client_carries_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """远端挂起时必须能超时脱困：SDK 默认 600s 会让图节点永久停住。"""
+    import anthropic
+
+    monkeypatch.setenv("OMAS_TEST_KEY", "sk-test")
+    real = anthropic.AsyncAnthropic
+    seen: dict[str, object] = {}
+
+    def spy(**kwargs: object) -> object:
+        seen.update(kwargs)
+        return real(**kwargs)  # type: ignore[arg-type,return-value]
+
+    monkeypatch.setattr(anthropic, "AsyncAnthropic", spy)
+    gateway = ModelGateway(policy=DataPolicy.LLM_ALLOWED)
+    build_model(REMOTE, gateway=gateway, policy=DataPolicy.LLM_ALLOWED)
+    timeout = seen.get("timeout")
+    assert timeout is not None, "AsyncAnthropic was built without a timeout"
+    assert float(timeout) <= 200.0, f"expected bounded timeout, got {timeout!r}"
